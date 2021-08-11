@@ -4,13 +4,14 @@ from dataset import MoleculeDataset
 from tqdm import tqdm
 import numpy as np
 import mlflow.pytorch
-from utils import count_parameters, gvae_loss, reconstruction_accuracy
+from utils import count_parameters, gvae_loss, reconstruction_accuracy, \
+    slice_edge_type_from_edge_feats
 from gvae import GVAE
 from config import DEVICE as device
 
 # Load data
-train_dataset = MoleculeDataset(root="data/", filename="HIV_train_oversampled.csv")[:10000]
-test_dataset = MoleculeDataset(root="data/", filename="HIV_test.csv", test=True)[:10000]
+train_dataset = MoleculeDataset(root="data/", filename="HIV_train_oversampled.csv")[:1000]
+test_dataset = MoleculeDataset(root="data/", filename="HIV_test.csv", test=True)[:1000]
 
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=32, shuffle=True)
@@ -23,7 +24,7 @@ print("Model parameters: ", count_parameters(model))
 # Define loss and optimizer
 loss_fn = gvae_loss
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-kl_beta = 0.001
+kl_beta = 0.01
 
 # Train function
 def run_one_epoch(data_loader, type, epoch, kl_beta):
@@ -37,7 +38,7 @@ def run_one_epoch(data_loader, type, epoch, kl_beta):
     reconstructed_mols = 0
 
     # Iterate over data loader
-    for i, batch in enumerate(tqdm(data_loader)):
+    for _, batch in enumerate(tqdm(data_loader)):
         # Some of the data points have invalid adjacency matrices 
         try:
             # Use GPU
@@ -50,12 +51,13 @@ def run_one_epoch(data_loader, type, epoch, kl_beta):
                                             batch.edge_index, 
                                             batch.batch) 
             # Calculate loss and backpropagate
-            loss, kl_div = loss_fn(triu_logits, batch.edge_index, mu, logvar, batch.batch, kl_beta)
+            edge_targets = slice_edge_type_from_edge_feats(batch.edge_attr.float())
+            loss, kl_div = loss_fn(triu_logits, batch.edge_index, edge_targets, mu, logvar, batch.batch, kl_beta)
             if type == "Train":
                 loss.backward()  
                 optimizer.step()  
             # Calculate metrics
-            acc, num_recon = reconstruction_accuracy(triu_logits, batch.edge_index, batch.batch, batch.x.float())
+            acc, num_recon = reconstruction_accuracy(triu_logits, batch.edge_index, edge_targets, batch.batch, batch.x.float())
             total_mols = total_mols + len(batch.smiles)
             reconstructed_mols = reconstructed_mols + num_recon 
 
@@ -63,12 +65,10 @@ def run_one_epoch(data_loader, type, epoch, kl_beta):
             all_losses.append(loss.detach().cpu().numpy())
             all_accs.append(acc)
             all_kldivs.append(kl_div.detach().cpu().numpy())
-
         except IndexError as error:
             # For a few graphs the edge information is not correct
             # Simply skip the batch containing those
             print("Error: ", error)
-    
     print(f"{type} epoch {epoch} loss: ", np.array(all_losses).mean())
     print(f"{type} epoch {epoch} accuracy: ", np.array(all_accs).mean())
     print(f"Reconstructed {reconstructed_mols} out of {total_mols} molecules.")
@@ -76,7 +76,7 @@ def run_one_epoch(data_loader, type, epoch, kl_beta):
     mlflow.log_metric(key=f"{type} Epoch Accuracy", value=float(np.array(all_accs).mean()), step=epoch)
     mlflow.log_metric(key=f"{type} Num Reconstructed", value=float(reconstructed_mols), step=epoch)
     mlflow.log_metric(key=f"{type} KL Divergence", value=float(np.array(all_kldivs).mean()), step=epoch)
-    mlflow.log_model(model, "model")
+    mlflow.pytorch.log_model(model, "model")
 
 # Run training
 with mlflow.start_run() as run:

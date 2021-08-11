@@ -6,6 +6,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 import deepchem as dc
+from config import MAX_MOLECULE_SIZE
 
 print(f"Torch version: {torch.__version__}")
 print(f"Cuda available: {torch.cuda.is_available()}")
@@ -45,21 +46,39 @@ class MoleculeDataset(Dataset):
     def process(self):
         self.data = pd.read_csv(self.raw_paths[0]).reset_index()
         featurizer = dc.feat.MolGraphConvFeaturizer(use_edges=True)
+        last_valid_mol = None
         for index, mol in tqdm(self.data.iterrows(), total=self.data.shape[0]):
             # Featurize molecule
             f = featurizer.featurize(mol["smiles"])
             data = f[0].to_pyg_graph()
             data.y = self._get_label(mol["HIV_active"])
             data.smiles = mol["smiles"]
-            if self.test:
-                torch.save(data, 
-                    os.path.join(self.processed_dir, 
-                                 f'data_test_{index}.pt'))
-            else:
-                torch.save(data, 
-                    os.path.join(self.processed_dir, 
-                                 f'data_{index}.pt'))
             
+            # Only save if molecule is in permitted size
+            if data.x.shape[0] < MAX_MOLECULE_SIZE:
+                if self.test:
+                    torch.save(data, 
+                        os.path.join(self.processed_dir, 
+                                    f'data_test_{index}.pt'))
+                else:
+                    torch.save(data, 
+                        os.path.join(self.processed_dir, 
+                                    f'data_{index}.pt'))
+                last_valid_mol = data
+            else:
+                if last_valid_mol is not None:
+                    # Save duplicates as placeholders
+                    if self.test:
+                        torch.save(last_valid_mol, 
+                            os.path.join(self.processed_dir, 
+                                        f'data_test_{index}.pt'))
+                    else:
+                        torch.save(last_valid_mol, 
+                            os.path.join(self.processed_dir, 
+                                        f'data_{index}.pt'))
+                else:
+                    print("First mol needs to be valid.")
+                    assert False
 
     def _get_label(self, label):
         label = np.asarray([label])
