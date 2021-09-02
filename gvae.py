@@ -114,9 +114,9 @@ class GVAE(nn.Module):
         # Get predictions
         x = self.decoder_dense_1(inputs).relu()
         x = self.decoder_bn_1(x)
-        x = self.decoder_dense_2(inputs).relu()
+        x = self.decoder_dense_2(x).relu()
         x = self.decoder_bn_2(x)
-        x = self.decoder_dense_3(inputs).relu()
+        x = self.decoder_dense_3(x).relu()
         x = self.decoder_bn_3(x)
         edge_logits = self.decoder_dense_4(x)
 
