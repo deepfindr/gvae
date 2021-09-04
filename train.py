@@ -4,15 +4,14 @@ from dataset import MoleculeDataset
 from tqdm import tqdm
 import numpy as np
 import mlflow.pytorch
-from utils import count_parameters, gvae_loss, reconstruction_accuracy, \
-    slice_edge_type_from_edge_feats
+from utils import (count_parameters, gvae_loss, 
+        slice_edge_type_from_edge_feats, slice_atom_type_from_node_feats)
 from gvae import GVAE
 from config import DEVICE as device
 
 # Load data
-train_dataset = MoleculeDataset(root="data/", filename="HIV_train_oversampled.csv")[:1000]
+train_dataset = MoleculeDataset(root="data/", filename="HIV_train_oversampled.csv")[:10000]
 test_dataset = MoleculeDataset(root="data/", filename="HIV_test.csv", test=True)[:1000]
-
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=32, shuffle=True)
 
@@ -23,19 +22,14 @@ print("Model parameters: ", count_parameters(model))
 
 # Define loss and optimizer
 loss_fn = gvae_loss
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-kl_beta = 0.01
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+kl_beta = 0.5
 
 # Train function
 def run_one_epoch(data_loader, type, epoch, kl_beta):
     # Store per batch loss and accuracy 
     all_losses = []
-    all_accs = []
     all_kldivs = []
-
-    # Save some numbers
-    total_mols = 0
-    reconstructed_mols = 0
 
     # Iterate over data loader
     for _, batch in enumerate(tqdm(data_loader)):
@@ -46,35 +40,37 @@ def run_one_epoch(data_loader, type, epoch, kl_beta):
             # Reset gradients
             optimizer.zero_grad() 
             # Call model
-            triu_logits, mu, logvar = model(batch.x.float(), 
-                                            batch.edge_attr.float(),
-                                            batch.edge_index, 
-                                            batch.batch) 
+            triu_logits, node_logits, mu, logvar = model(batch.x.float(), 
+                                                        batch.edge_attr.float(),
+                                                        batch.edge_index, 
+                                                        batch.batch) 
             # Calculate loss and backpropagate
             edge_targets = slice_edge_type_from_edge_feats(batch.edge_attr.float())
-            loss, kl_div = loss_fn(triu_logits, batch.edge_index, edge_targets, mu, logvar, batch.batch, kl_beta)
+            node_targets = slice_atom_type_from_node_feats(batch.x.float(), as_index=True)
+            loss, kl_div = loss_fn(triu_logits, node_logits,
+                                   batch.edge_index, edge_targets, 
+                                   node_targets, mu, logvar, 
+                                   batch.batch, kl_beta)
             if type == "Train":
                 loss.backward()  
-                optimizer.step()  
-            # Calculate metrics
-            acc, num_recon = reconstruction_accuracy(triu_logits, batch.edge_index, edge_targets, batch.batch, batch.x.float())
-            total_mols = total_mols + len(batch.smiles)
-            reconstructed_mols = reconstructed_mols + num_recon 
-
+                optimizer.step() 
             # Store loss and metrics
             all_losses.append(loss.detach().cpu().numpy())
-            all_accs.append(acc)
+            #all_accs.append(acc)
             all_kldivs.append(kl_div.detach().cpu().numpy())
         except IndexError as error:
             # For a few graphs the edge information is not correct
             # Simply skip the batch containing those
             print("Error: ", error)
+    
+    # Perform sampling
+    if type == "Test":
+        generated_mols = model.sample_mols(num=10000)
+        print(f"Generated {generated_mols} molecules.")
+        mlflow.log_metric(key=f"Sampled molecules", value=float(generated_mols), step=epoch)
+
     print(f"{type} epoch {epoch} loss: ", np.array(all_losses).mean())
-    print(f"{type} epoch {epoch} accuracy: ", np.array(all_accs).mean())
-    print(f"Reconstructed {reconstructed_mols} out of {total_mols} molecules.")
     mlflow.log_metric(key=f"{type} Epoch Loss", value=float(np.array(all_losses).mean()), step=epoch)
-    mlflow.log_metric(key=f"{type} Epoch Accuracy", value=float(np.array(all_accs).mean()), step=epoch)
-    mlflow.log_metric(key=f"{type} Num Reconstructed", value=float(reconstructed_mols), step=epoch)
     mlflow.log_metric(key=f"{type} KL Divergence", value=float(np.array(all_kldivs).mean()), step=epoch)
     mlflow.pytorch.log_model(model, "model")
 
